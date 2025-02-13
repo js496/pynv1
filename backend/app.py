@@ -4,6 +4,7 @@ from fastapi.encoders import jsonable_encoder
 from contextlib import asynccontextmanager
 import json
 import subprocess
+import pynvml
 import docker
 from docker.types import DeviceRequest
 import asyncio
@@ -18,8 +19,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Global variables
-device_request = DeviceRequest(count=-1, capabilities=[["gpu"]])
 client = docker.from_env()
+pynvml.nvmlInit()
+
+
 
 REDIS_IP = "123.217.93.26"
 REDIS_PORT = 59028
@@ -29,32 +32,51 @@ r = redis.Redis(host=REDIS_IP, port=REDIS_PORT, db=0)
 
 def get_gpu_info() -> List[Dict[str, float]]:
     """
-    Fetch GPU information using `nvidia-smi`.
+    Fetch GPU information using `pynvml`.
 
     Returns:
         List[Dict]: A list of dictionaries containing GPU information.
     """
     try:
-        result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=count,utilization.gpu,memory.used,memory.total", "--format=csv,nounits,noheader"],
-            capture_output=True,
-            text=True,
-        )
-        output = result.stdout.strip().split("\n")
+        # Initialize the NVML library
+        pynvml.nvmlInit()
+
+        # Get the number of GPUs
+        device_count = pynvml.nvmlDeviceGetCount()
         gpu_info = []
-        for line in output:
-            gpu_count, gpu_util, mem_used, mem_total = map(float, line.split(", "))
+
+        for i in range(device_count):
+            # Get handle for the GPU
+            handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+
+            # Get GPU utilization
+            utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            gpu_util = utilization.gpu  # GPU utilization percentage
+
+            # Get GPU memory information
+            memory_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            mem_used = memory_info.used / 1024**2  # Convert bytes to MB
+            mem_total = memory_info.total / 1024**2  # Convert bytes to MB
+            mem_util = (mem_used / mem_total) * 100  # Memory utilization percentage
+
+            # Append GPU info to the list
             gpu_info.append({
-                "gpu_count": int(gpu_count),
-                "gpu_util": gpu_util,
-                "mem_used": mem_used,
-                "mem_total": mem_total,
-                "mem_util": (mem_used / mem_total) * 100,
+                "gpu_count": device_count,  # Total number of GPUs
+                "gpu_util": float(gpu_util),
+                "mem_used": float(mem_used),
+                "mem_total": float(mem_total),
+                "mem_util": float(mem_util),
             })
+
+        # Shutdown NVML
+        pynvml.nvmlShutdown()
+
         return gpu_info
+
     except Exception as e:
         logger.error(f"Error fetching GPU info: {e}")
         return []
+
 
 
 async def redis_timer():
